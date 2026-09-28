@@ -18,7 +18,7 @@ import math
 import sys
 from datetime import datetime
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
@@ -26,10 +26,10 @@ VERSION = "1.0.0"
 RULES = {
     # account-level safety
     "halt_value": 1137.00,            # 75% of ~$1,516 start: liquidate + halt
-    "bp_kill": 500.00,                # buying power below this: liquidate + halt
-    "bp_min_after_buy": 550.00,       # never buy below this leftover buying power
+    "bp_kill": 250.00,                # buying power below this: liquidate + halt
+    "bp_min_after_buy": 300.00,       # never buy below this leftover buying power
     "daily_loss_no_buys": 0.06,       # down 6% vs start of day: no new buys
-    "max_orders_per_day": 8,
+    "max_orders_per_day": 12,
     "waterfall_iwm_drop": 0.02,       # IWM down 2%+ and below its open: no buys
     "buy_window_et": ("09:45", "15:45"),
     # universe
@@ -43,10 +43,10 @@ RULES = {
     "max_positions": 7,
     "max_name_pct": 0.18,
     "max_sector_pct": 0.45,
-    "trade_cap": 200.00,
-    "size_default": 100.00,
-    "size_mid": 150.00,
-    "size_high": 200.00,
+    "trade_cap": 250.00,
+    "size_default": 150.00,
+    "size_mid": 200.00,
+    "size_high": 250.00,
     "max_high_conviction_per_day": 2,
     "max_same_industry_buys_per_day": 3,
     "limit_markup_max": 0.005,        # limit <= ask + 0.5%
@@ -60,7 +60,7 @@ RULES = {
     "stop_pct": 0.10,
     "trail_trigger": 0.12,
     "trail_pct": 0.15,
-    "take_profit": 0.30,
+    "take_profit": 0.50,
     "time_stop_days": 25,
     "time_stop_gain": 0.05,
     # screening
@@ -170,7 +170,7 @@ def screen(data):
                 notes.append({"symbol": sym, "reason": f"price ${p:.2f} under $5"})
                 continue
             if p > RULES["trade_cap"]:
-                notes.append({"symbol": sym, "reason": f"price ${p:.2f} over the $200 cap"})
+                notes.append({"symbol": sym, "reason": f"price ${p:.2f} over the ${RULES['trade_cap']:.0f} cap"})
                 continue
             if sym in rejected and abs(pct(p, rejected[sym])) < RULES["rejected_recheck_move"]:
                 continue
@@ -225,7 +225,7 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
         info["reasons"].append("price under $5")
         return False, info
     if price > RULES["trade_cap"]:
-        info["reasons"].append("price over the $200 cap")
+        info["reasons"].append(f"price over the ${RULES['trade_cap']:.0f} cap")
         return False, info
     if mcap < RULES["mcap_min"]:
         fails.append(f"market cap ${mcap/1e6:.0f}M under $200M")
@@ -386,7 +386,7 @@ def manage_position(p, now_date, bought_today):
                 acts.append({"action": "sell", "symbol": sym, "qty": half, "type": "market",
                              "cancel_order_id": (p.get("stop_order") or {}).get("id"),
                              "rule": "take_profit",
-                             "reason": f"up {gain*100:.1f}% (>= 30%): selling half",
+                             "reason": f"up {gain*100:.1f}% (>= {RULES['take_profit']*100:.0f}%): selling half",
                              "then_stop": None if frac else {"qty": qty - half, "stop_price": desired}})
                 return acts
 
@@ -526,9 +526,9 @@ def decide(s):
         if qty == 0:
             reasons.append(f"${limit:.2f}/share: 0 whole shares at ${size:.0f}")
         if notional > RULES["trade_cap"] + 1e-9:
-            reasons.append("over the $200 cap")
+            reasons.append(f"over the ${RULES['trade_cap']:.0f} cap")
         if notional > RULES["max_name_pct"] * tv:
-            reasons.append("over 18% of account")
+            reasons.append(f"over {RULES['max_name_pct']*100:.0f}% of account")
         sec = info.get("sector")
         if (sector_val.get(sec, 0) + notional) > RULES["max_sector_pct"] * tv:
             reasons.append(f"sector {sec} would exceed 45%")
@@ -536,7 +536,7 @@ def decide(s):
         if industry_buys.get(ind, 0) >= RULES["max_same_industry_buys_per_day"]:
             reasons.append(f"already 3 buys in {ind} today")
         if bp_left - notional < RULES["bp_min_after_buy"]:
-            reasons.append(f"would leave buying power ${bp_left - notional:,.2f} (< $550)")
+            reasons.append(f"would leave buying power ${bp_left - notional:,.2f} (< ${RULES['bp_min_after_buy']:,.0f})")
         if reasons:
             out["skipped"].append({"symbol": sym, "reason": "; ".join(reasons),
                                    "detail": _brief(info)})
@@ -550,7 +550,7 @@ def decide(s):
                        f"SMA50 ${info['sma50']:.2f}, RSI {info['rsi14']}, vol pace "
                        f"{info['vol_pace']}x, vol {info.get('vol_ratio')}x IWM; quality "
                        f"{info['quality']['count']}/6 ({', '.join(info['quality']['met'])})"
-                       + ("; earnings within 2 days, sized at $100" if info["earnings_soon"] else "")),
+                       + (f"; earnings within 2 days, sized at ${RULES['size_default']:.0f}" if info["earnings_soon"] else "")),
         })
         budget -= 2
         n_pos += 1

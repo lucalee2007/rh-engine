@@ -93,7 +93,7 @@ class TestSafety(unittest.TestCase):
         self.assertEqual(out["actions"][0]["cancel_order_id"], "x")
 
     def test_bp_kill(self):
-        out = E.decide(base_snapshot(account={"total_value": 1500.0, "buying_power": 450.0}))
+        out = E.decide(base_snapshot(account={"total_value": 1500.0, "buying_power": 200.0}))
         self.assertTrue(out["halt"])
 
     def test_daily_loss_blocks_buys(self):
@@ -120,7 +120,7 @@ class TestSafety(unittest.TestCase):
 
     def test_order_budget(self):
         price, c = breakout_candidate()
-        s = base_snapshot(orders_today=7, candidates={"ABC": c},
+        s = base_snapshot(orders_today=11, candidates={"ABC": c},
                           quotes={"ABC": {"price": price, "ask": price}})
         self.assertFalse(E.decide(s)["buys_allowed"])
 
@@ -138,13 +138,13 @@ class TestBuys(unittest.TestCase):
         buys = [a for a in out["actions"] if a["action"] == "buy"]
         self.assertEqual(len(buys), 1, out["skipped"])
         b = buys[0]
-        self.assertLessEqual(b["notional"], 200.0)
+        self.assertLessEqual(b["notional"], 250.0)
         self.assertLessEqual(b["limit_price"], price * 1.005 + 1e-9)
         self.assertEqual(b["qty"], math.floor(b["notional"] / b["limit_price"] + 1e-9))
 
     def test_bp_floor_blocks(self):
         price, c = breakout_candidate()
-        s = base_snapshot(account={"total_value": 1500.0, "buying_power": 600.0},
+        s = base_snapshot(account={"total_value": 1500.0, "buying_power": 400.0},
                           candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
         out = E.decide(s)
         self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
@@ -204,8 +204,8 @@ class TestPositions(unittest.TestCase):
         self.assertAlmostEqual(acts[0]["stop_price"], 11.05)
 
     def test_take_profit_half(self):
-        p = {"symbol": "ABC", "qty": 10, "avg_cost": 10.0, "price": 13.2,
-             "high_since_entry": 13.3, "stop_order": {"id": "s1", "stop_price": 11.3}}
+        p = {"symbol": "ABC", "qty": 10, "avg_cost": 10.0, "price": 15.2,
+             "high_since_entry": 15.3, "stop_order": {"id": "s1", "stop_price": 11.3}}
         acts = E.manage_position(p, "2026-09-24", set())
         self.assertEqual(acts[0]["rule"], "take_profit")
         self.assertEqual(acts[0]["qty"], 5)
@@ -231,13 +231,31 @@ class TestPositions(unittest.TestCase):
         self.assertFalse(any(a["action"] == "sell" for a in acts))
 
 
+class TestAggressiveRules(unittest.TestCase):
+    def test_no_take_profit_at_32pct(self):
+        p = {"symbol": "ABC", "qty": 10, "avg_cost": 10.0, "price": 13.2,
+             "high_since_entry": 13.3, "stop_order": {"id": "s1", "stop_price": 11.3}}
+        acts = E.manage_position(p, "2026-09-24", set())
+        self.assertFalse(any(a.get("rule") == "take_profit" for a in acts))
+
+    def test_bp_450_no_longer_halts(self):
+        out = E.decide(base_snapshot(account={"total_value": 1500.0, "buying_power": 450.0}))
+        self.assertFalse(out["halt"])
+
+    def test_orders_7_still_allows_buys(self):
+        price, c = breakout_candidate()
+        s = base_snapshot(orders_today=7, candidates={"ABC": c},
+                          quotes={"ABC": {"price": price, "ask": price}})
+        self.assertTrue(E.decide(s)["buys_allowed"])
+
+
 class TestScreen(unittest.TestCase):
     def test_screen_orders_and_filters(self):
         data = {"tiers": [["A", "B", "C"], ["D", "E"]],
                 "quotes": {"A": {"price": 10.3, "prev_close": 10.0},   # +3% breakout
                            "B": {"price": 9.8, "prev_close": 10.0},    # -2% pullback
                            "C": {"price": 4.0, "prev_close": 4.1},     # under $5
-                           "D": {"price": 250, "prev_close": 240},     # over $200
+                           "D": {"price": 300, "prev_close": 290},     # over $250
                            "E": {"price": 11.0, "prev_close": 10.0}},  # +10% tier 2
                 "held": [], "banned_today": []}
         out = E.screen(data)
