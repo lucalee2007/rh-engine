@@ -18,7 +18,7 @@ import math
 import sys
 from datetime import datetime
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
@@ -50,6 +50,10 @@ RULES = {
     "max_high_conviction_per_day": 2,
     "max_same_industry_buys_per_day": 3,
     "limit_markup_max": 0.005,        # limit <= ask + 0.5%
+    # whole-share rounding: buy one extra whole share when it still fits every cap;
+    # otherwise top up toward the target size with a fractional share (scan-managed,
+    # no broker stop). A position always needs at least 1 whole share.
+    "frac_min_dollars": 5.00,         # skip fractional top-ups smaller than this
     # entries
     "rsi_min": 30.0,
     "rsi_max": 75.0,
@@ -343,7 +347,9 @@ def manage_position(p, now_date, bought_today):
     """Return list of actions for one held position (sells / stop changes)."""
     acts = []
     sym, qty, cost, price = p["symbol"], p["qty"], p["avg_cost"], p["price"]
-    frac = abs(qty - round(qty)) > 1e-9
+    whole = math.floor(qty + 1e-9)        # shares covered by the broker GTC stop
+    frac_part = round(qty - whole, 6)     # fractional remainder, watched by the scans
+    frac = whole == 0 and frac_part > 0   # fully fractional: no broker stop at all
     high = max(p.get("high_since_entry") or price, price)
     existing = (p.get("stop_order") or {}).get("stop_price")
     floor_stop = p.get("stop_floor")      # a stop level that must never move lower
@@ -363,10 +369,17 @@ def manage_position(p, now_date, bought_today):
                      "cancel_order_id": (p.get("stop_order") or {}).get("id"),
                      "rule": rule, "reason": reason})
 
-    # stop hit (fractional shares have no broker stop; whole shares' broker stop handles it)
-    if price <= desired and (frac or not existing):
-        sell_all("stop", f"price ${price:.2f} at/below stop ${desired:.2f}")
-        return acts
+    # stop hit: fractional shares have no broker stop; whole shares' broker stop handles them
+    if price <= desired:
+        if frac or not existing:
+            sell_all("stop", f"price ${price:.2f} at/below stop ${desired:.2f}")
+            return acts
+        if frac_part > 0:
+            acts.append({"action": "sell", "symbol": sym, "qty": frac_part, "type": "market",
+                         "cancel_order_id": None, "rule": "stop",
+                         "reason": f"price ${price:.2f} at/below stop ${desired:.2f}: selling the "
+                                   f"fractional {frac_part} (broker stop covers {whole} whole)"})
+            return acts
 
     if not same_day:
         closes = p.get("closes") or []
@@ -381,21 +394,28 @@ def manage_position(p, now_date, bought_today):
             sell_all("time_stop", f"up {gain*100:.1f}% after {days} trading days")
             return acts
         if gain >= RULES["take_profit"] and not p.get("half_taken"):
-            half = math.floor(qty / 2) if not frac else round(qty / 2, 6)
+            if frac:
+                half_whole, half = 0, round(qty / 2, 6)
+            else:
+                # sell half the whole shares plus the whole unprotected fraction
+                half_whole = math.floor(whole / 2)
+                half = round(half_whole + frac_part, 6)
             if half > 0:
                 acts.append({"action": "sell", "symbol": sym, "qty": half, "type": "market",
-                             "cancel_order_id": (p.get("stop_order") or {}).get("id"),
+                             "cancel_order_id": (p.get("stop_order") or {}).get("id")
+                             if half_whole > 0 else None,
                              "rule": "take_profit",
                              "reason": f"up {gain*100:.1f}% (>= {RULES['take_profit']*100:.0f}%): selling half",
-                             "then_stop": None if frac else {"qty": qty - half, "stop_price": desired}})
+                             "then_stop": {"qty": whole - half_whole, "stop_price": desired}
+                             if half_whole > 0 else None})
                 return acts
 
     if not frac:
         if not existing:
-            acts.append({"action": "place_stop", "symbol": sym, "qty": qty, "stop_price": desired,
+            acts.append({"action": "place_stop", "symbol": sym, "qty": whole, "stop_price": desired,
                          "rule": "stop", "reason": "no live stop order"})
         elif desired > existing * 1.005:
-            acts.append({"action": "replace_stop", "symbol": sym, "qty": qty,
+            acts.append({"action": "replace_stop", "symbol": sym, "qty": whole,
                          "cancel_order_id": p["stop_order"]["id"], "stop_price": desired,
                          "rule": "trailing", "reason": f"raise stop ${existing:.2f} -> ${desired:.2f}"})
     p["_desired_stop"] = desired
@@ -518,18 +538,20 @@ def decide(s):
             size = RULES["size_high"] if info["conviction"] >= 5 else RULES["size_mid"]
         ask = info["ask"]
         limit = round2(min(ask * (1 + RULES["limit_markup_max"]), ask + max(0.01, ask * 0.002)))
-        qty = math.floor(size / limit)
-        if qty == 0 and limit <= RULES["trade_cap"] and top:
-            qty = 1
-        notional = qty * limit
+        sec = info.get("sector")
+        room = min(RULES["trade_cap"], RULES["max_name_pct"] * tv,
+                   bp_left - RULES["bp_min_after_buy"],
+                   RULES["max_sector_pct"] * tv - sector_val.get(sec, 0))
+        qty, frac_qty, sizing = size_order(size, limit, room, budget)
+        notional = qty * limit + frac_qty * limit
         reasons = []
         if qty == 0:
-            reasons.append(f"${limit:.2f}/share: 0 whole shares at ${size:.0f}")
+            reasons.append(f"${limit:.2f}/share: no whole share fits (target ${size:.0f}, "
+                           f"room ${max(room, 0):.2f})")
         if notional > RULES["trade_cap"] + 1e-9:
             reasons.append(f"over the ${RULES['trade_cap']:.0f} cap")
         if notional > RULES["max_name_pct"] * tv:
             reasons.append(f"over {RULES['max_name_pct']*100:.0f}% of account")
-        sec = info.get("sector")
         if (sector_val.get(sec, 0) + notional) > RULES["max_sector_pct"] * tv:
             reasons.append(f"sector {sec} would exceed 45%")
         ind = info.get("industry")
@@ -542,7 +564,8 @@ def decide(s):
                                    "detail": _brief(info)})
             continue
         out["actions"].append({
-            "action": "buy", "symbol": sym, "qty": qty, "limit_price": limit,
+            "action": "buy", "symbol": sym, "qty": qty, "frac_qty": frac_qty,
+            "limit_price": limit, "sizing": sizing,
             "notional": round2(notional), "time_in_force": "gfd",
             "stop_after_fill_pct": RULES["stop_pct"], "rule": info["setup"],
             "conviction": info["conviction"],
@@ -552,7 +575,7 @@ def decide(s):
                        f"{info['quality']['count']}/6 ({', '.join(info['quality']['met'])})"
                        + (f"; earnings within 2 days, sized at ${RULES['size_default']:.0f}" if info["earnings_soon"] else "")),
         })
-        budget -= 2
+        budget -= 3 if frac_qty else 2
         n_pos += 1
         bp_left -= notional
         sector_val[sec] = sector_val.get(sec, 0) + notional
@@ -560,6 +583,25 @@ def decide(s):
         if top:
             high_conv_used += 1
     return _finish(out, positions)
+
+
+def size_order(size, limit, room, budget):
+    """Whole shares toward `size`, rounding up one share when it fits `room` (the tightest
+    of the trade cap, 18%-per-name, buying-power floor and sector cap). If rounding up
+    doesn't fit, top up toward `size` with a fractional share (needs 3 orders left:
+    whole buy, its stop, fractional buy). Returns (whole_qty, frac_qty, note)."""
+    whole = math.floor(size / limit + 1e-9)
+    if whole * limit < size - 1e-9 and (whole + 1) * limit <= room + 1e-9:
+        return whole + 1, 0.0, f"rounded up to {whole + 1} whole (${(whole + 1) * limit:.2f})"
+    if whole == 0:
+        return 0, 0.0, "no whole share fits"
+    frac = math.floor((size - whole * limit) / limit * 1e6) / 1e6
+    frac_cost = frac * limit
+    if (frac_cost < RULES["frac_min_dollars"] or budget < 3
+            or whole * limit + frac_cost > room + 1e-9):
+        return whole, 0.0, f"{whole} whole (${whole * limit:.2f})"
+    return whole, frac, (f"{whole} whole (${whole * limit:.2f}, broker stop) + {frac} fractional "
+                         f"(${frac_cost:.2f}, scan-managed)")
 
 
 def _brief(info):
@@ -573,8 +615,10 @@ def _finish(out, positions):
             f"position {p['symbol']}: {p['qty']} @ ${p['avg_cost']:.2f}, now ${p['price']:.2f} "
             f"({pct(p['price'], p['avg_cost'])*100:+.1f}%), stop ${p.get('_desired_stop', 0):.2f}")
     for a in out["actions"]:
+        qty_txt = f"{a.get('qty')}" + (f" + {a['frac_qty']} frac" if a.get("frac_qty") else "")
         out["log"].append(f"ACTION {a['action'].upper()} {a['symbol']} "
-                          f"{a.get('qty')} | {a['rule']} | {a['reason']}")
+                          f"{qty_txt} | {a['rule']} | {a['reason']}"
+                          + (f" | sizing: {a['sizing']}" if a.get("sizing") else ""))
     for sk in out["skipped"]:
         out["log"].append(f"SKIPPED {sk['symbol']} | {sk['reason']}")
     return out

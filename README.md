@@ -35,5 +35,13 @@ orders it returns. Every hard limit lives in `RULES` at the top of
 ## Output actions
 `sell` (cancel `cancel_order_id` first, then market sell `qty`; `then_stop` = new stop
 for the remaining shares), `place_stop`, `replace_stop` (cancel, then new GTC stop),
-`buy` (limit, GFD; after it fills place a GTC stop `stop_after_fill_pct` below the fill).
+`buy` (limit, GFD; after it fills place a GTC stop `stop_after_fill_pct` below the fill,
+for the whole-share `qty` only). If `frac_qty` > 0, after the whole shares also buy that
+fractional quantity as a MARKET order, regular hours, GFD, only if the live ask is still
+within 0.5% of `limit_price` (Robinhood takes fractional orders only as market orders in
+regular hours, and won't hold any stop on a fraction). The fraction has no broker stop; the
+scans manage it.
+Sizing: whole shares toward the target, rounded up one share when that still fits the $250
+cap, 18% per name, the buying-power floor and the sector cap; otherwise topped up with a
+fraction. Stops (`place_stop`, `replace_stop`, `then_stop`) always cover whole shares only.
 `near_misses` are the only names eligible for a logged EXCEPTION.

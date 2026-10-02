@@ -262,5 +262,75 @@ class TestScreen(unittest.TestCase):
         self.assertEqual(out["deep_check"], ["A", "E", "B"])
 
 
+class TestHybridSizing(unittest.TestCase):
+    def test_round_up_when_it_fits(self):
+        # KLIC-like: $150 target at $90.75 -> 2 whole shares ($181.50 <= $250)
+        q, f, _ = E.size_order(150, 90.75, 250, 10)
+        self.assertEqual((q, f), (2, 0.0))
+
+    def test_fraction_when_round_up_breaks_cap(self):
+        # $250 target at $200: 2 shares = $400 > cap -> 1 whole + 0.25 fractional
+        q, f, _ = E.size_order(250, 200.0, 250, 10)
+        self.assertEqual(q, 1)
+        self.assertAlmostEqual(f, 0.25)
+
+    def test_no_fraction_without_order_budget(self):
+        q, f, _ = E.size_order(250, 200.0, 250, 2)
+        self.assertEqual((q, f), (1, 0.0))
+
+    def test_tiny_fraction_skipped(self):
+        # $150 at $148: round-up ($296) breaks cap, fraction worth $2 < $5 minimum
+        q, f, _ = E.size_order(150, 148.0, 250, 10)
+        self.assertEqual((q, f), (1, 0.0))
+
+    def test_never_fraction_only(self):
+        # $150 target at $260: no whole share fits the $250 cap -> no buy at all
+        q, f, _ = E.size_order(150, 260.0, 250, 10)
+        self.assertEqual((q, f), (0, 0.0))
+
+    def test_round_up_respects_name_cap(self):
+        # room limited to $170 -> stays at 1 whole + fraction
+        q, f, _ = E.size_order(150, 90.0, 170, 10)
+        self.assertEqual(q, 1)
+        self.assertLessEqual((q + f) * 90.0, 170)
+
+    def test_buy_action_total_within_caps(self):
+        price, c = breakout_candidate()
+        s = base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
+        b = [a for a in E.decide(s)["actions"] if a["action"] == "buy"][0]
+        self.assertGreaterEqual(b["qty"], 1)
+        self.assertLessEqual(b["notional"], 250.0 + 1e-9)
+
+    def test_mixed_position_stop_covers_whole_only(self):
+        p = {"symbol": "KLIC", "qty": 1.65, "avg_cost": 90.75, "price": 92.0, "stop_order": None}
+        acts = E.manage_position(p, "2026-10-02", set())
+        self.assertEqual(acts[0]["action"], "place_stop")
+        self.assertEqual(acts[0]["qty"], 1)
+
+    def test_mixed_position_stop_hit_sells_fraction(self):
+        p = {"symbol": "KLIC", "qty": 1.65, "avg_cost": 90.75, "price": 81.0,
+             "stop_order": {"id": "s1", "stop_price": 81.67}}
+        acts = E.manage_position(p, "2026-10-02", set())
+        self.assertEqual(acts[0]["action"], "sell")
+        self.assertAlmostEqual(acts[0]["qty"], 0.65)
+        self.assertIsNone(acts[0]["cancel_order_id"])
+
+    def test_mixed_take_profit_sells_fraction_keeps_stopped_whole(self):
+        p = {"symbol": "ABC", "qty": 1.4, "avg_cost": 10.0, "price": 15.2, "high_since_entry": 15.3,
+             "stop_order": {"id": "s1", "stop_price": 11.3}}
+        acts = E.manage_position(p, "2026-10-02", set())
+        self.assertEqual(acts[0]["rule"], "take_profit")
+        self.assertAlmostEqual(acts[0]["qty"], 0.4)
+        self.assertIsNone(acts[0]["cancel_order_id"])
+        self.assertIsNone(acts[0]["then_stop"])
+
+    def test_mixed_take_profit_three_and_a_bit(self):
+        p = {"symbol": "ABC", "qty": 3.4, "avg_cost": 10.0, "price": 15.2, "high_since_entry": 15.3,
+             "stop_order": {"id": "s1", "stop_price": 11.3}}
+        a = E.manage_position(p, "2026-10-02", set())[0]
+        self.assertAlmostEqual(a["qty"], 1.4)
+        self.assertEqual(a["then_stop"]["qty"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
