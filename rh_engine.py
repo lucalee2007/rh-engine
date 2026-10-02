@@ -62,6 +62,7 @@ RULES = {
     "quality_min": 2,                 # need at least 2 of 6 criteria...
     "fundamental_min": 1,             # ...and at least 1 of them a business criterion
                                       # (revenue growth, gross margin, profits/narrowing losses)
+                                      # when financials exist. 0 turns this check off.
     "rs_days": 63,                    # relative strength lookback (~3 months)
     "rs_min": 0.0,                    # must not lag IWM over rs_days
     "rs_bonus": 0.10,                 # +1 conviction when beating IWM by 10%+
@@ -356,7 +357,7 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
     info["quality"] = q
     if q["count"] < RULES["quality_min"]:
         fails.append(f"quality {q['count']}/6 (needs 2): {', '.join(q['met']) or 'none'}")
-    elif q["fundamental"] < RULES["fundamental_min"]:
+    elif q["fundamental"] < RULES["fundamental_min"] and q["has_fin"]:
         fails.append(f"no business criterion (needs revenue growth, gross margin or profits): "
                      f"{', '.join(q['met'])}")
 
@@ -402,7 +403,9 @@ def quality(fin, vol_ratio, group, fund):
         met.append(f"growth driver ({group})")
     if vol_ratio and vol_ratio >= RULES["vol_ratio_min"]:
         met.append(f"high beta (vol {vol_ratio:.1f}x IWM)")
-    return {"count": len(met), "met": met, "fundamental": fundamental}
+    # has_fin: Robinhood has no financials for ~40% of the watchlist; the business check
+    # only applies when there are 5+ quarters to judge (otherwise it would ban those names)
+    return {"count": len(met), "met": met, "fundamental": fundamental, "has_fin": len(rows) >= 5}
 
 
 def manage_position(p, now_date, bought_today):

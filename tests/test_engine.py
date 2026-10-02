@@ -334,17 +334,25 @@ class TestHybridSizing(unittest.TestCase):
 
 class TestQuantV13(unittest.TestCase):
     def test_free_points_no_longer_pass_quality(self):
-        # driver group + high beta + low debt but no business criterion
+        # driver group + high beta + low debt, financials show no business criterion
         q = E.quality([], 2.5, "semis", {"debt_to_equity": 0.5})
         self.assertGreaterEqual(q["count"], 2)
         self.assertEqual(q["fundamental"], 0)
         price, c = breakout_candidate()
-        c["fin"] = []
+        c["fin"] = [{"revenue": 100, "gross_profit": 10, "net_income": -20}] * 6
         c["fund"]["debt_to_equity"] = 0.5
         s = base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
         out = E.decide(s)
         self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
         self.assertIn("business criterion", out["skipped"][0]["reason"])
+
+    def test_no_financials_not_banned(self):
+        # names Robinhood has no financials for still trade on the other criteria
+        price, c = breakout_candidate()
+        c["fin"] = []
+        c["fund"]["debt_to_equity"] = 0.5
+        s = base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
+        self.assertTrue(any(a["action"] == "buy" for a in E.decide(s)["actions"]))
 
     def test_missing_gross_profit_not_counted(self):
         fin = [dict(r, gross_profit=None) for r in GOOD_FIN]
