@@ -58,3 +58,10 @@ fraction. Stops (`place_stop`, `replace_stop`, `then_stop`) always cover whole s
 - Relative strength: skip names lagging IWM over 63 trading days; rank buys by
   conviction, then 63-day outperformance (no longer by volatility). +1 conviction when
   beating IWM by 10%+.
+
+## v1.4.0 price band and sizing
+- New buys only between $5 and $50 a share (`price_max`). Held names above $50 are still
+  managed normally (stops, trails, exits).
+- Preferred band $10-$25: ranked ahead of other names with the same conviction, in both
+  `screen` and `decide`.
+- Up to 10 positions; buys sized $200 / $250 / $300 by conviction, $300 cap, 20% per name.

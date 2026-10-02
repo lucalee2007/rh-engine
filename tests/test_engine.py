@@ -52,8 +52,8 @@ def base_snapshot(**kw):
     return s
 
 
-def breakout_candidate():
-    closes = uptrend_closes()
+def breakout_candidate(start=20.0):
+    closes = uptrend_closes(start=start)
     bars = bars_from(closes, vol=1_000_000)
     hi20 = max(b["h"] for b in bars[-20:])
     price = round(hi20 * 1.01, 2)
@@ -138,7 +138,7 @@ class TestBuys(unittest.TestCase):
         buys = [a for a in out["actions"] if a["action"] == "buy"]
         self.assertEqual(len(buys), 1, out["skipped"])
         b = buys[0]
-        self.assertLessEqual(b["notional"], 250.0)
+        self.assertLessEqual(b["notional"], E.RULES["trade_cap"])
         self.assertLessEqual(b["limit_price"], price * 1.005 + 1e-9)
         self.assertEqual(b["qty"], math.floor(b["notional"] / b["limit_price"] + 1e-9))
 
@@ -255,7 +255,7 @@ class TestScreen(unittest.TestCase):
                 "quotes": {"A": {"price": 10.3, "prev_close": 10.0},   # +3% breakout
                            "B": {"price": 9.8, "prev_close": 10.0},    # -2% pullback
                            "C": {"price": 4.0, "prev_close": 4.1},     # under $5
-                           "D": {"price": 300, "prev_close": 290},     # over $250
+                           "D": {"price": 60, "prev_close": 58},       # over $50
                            "E": {"price": 11.0, "prev_close": 10.0}},  # +10% tier 2
                 "held": [], "banned_today": []}
         out = E.screen(data)
@@ -299,7 +299,7 @@ class TestHybridSizing(unittest.TestCase):
         s = base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
         b = [a for a in E.decide(s)["actions"] if a["action"] == "buy"][0]
         self.assertGreaterEqual(b["qty"], 1)
-        self.assertLessEqual(b["notional"], 250.0 + 1e-9)
+        self.assertLessEqual(b["notional"], E.RULES["trade_cap"] + 1e-9)
 
     def test_mixed_position_stop_covers_whole_only(self):
         p = {"symbol": "KLIC", "qty": 1.65, "avg_cost": 90.75, "price": 92.0, "stop_order": None}
@@ -403,3 +403,43 @@ class TestQuantV13(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPriceBand(unittest.TestCase):
+    def test_screen_skips_over_price_max(self):
+        data = {"tiers": [["HI", "OK"]],
+                "quotes": {"HI": {"price": 55.0, "prev_close": 53.0},
+                           "OK": {"price": 20.6, "prev_close": 20.0}},
+                "held": [], "banned_today": []}
+        out = E.screen(data)
+        self.assertEqual(out["deep_check"], ["OK"])
+        self.assertTrue(any(n["symbol"] == "HI" and "over $50" in n["reason"] for n in out["notes"]))
+
+    def test_screen_prefers_sweet_spot_within_tier(self):
+        data = {"tiers": [["BIG", "MID"]],
+                "quotes": {"BIG": {"price": 42.0, "prev_close": 40.0},   # +5%, outside $10-25
+                           "MID": {"price": 15.45, "prev_close": 15.0}}, # +3%, inside $10-25
+                "held": [], "banned_today": []}
+        self.assertEqual(E.screen(data)["deep_check"], ["MID", "BIG"])
+
+    def test_decide_rejects_over_price_max(self):
+        price, c = breakout_candidate(start=40.0)
+        self.assertGreater(price, E.RULES["price_max"])
+        out = E.decide(base_snapshot(candidates={"HI": c}, quotes={"HI": {"price": price, "ask": price}}))
+        self.assertFalse([a for a in out["actions"] if a["action"] == "buy"])
+        self.assertTrue(any("over $50" in k["reason"] for k in out["skipped"]))
+
+    def test_decide_ranks_sweet_spot_first(self):
+        p1, c1 = breakout_candidate(start=30.0)   # ~$41
+        p2, c2 = breakout_candidate(start=10.0)   # ~$14
+        s = base_snapshot(account={"total_value": 2000.0, "buying_power": 2000.0},
+                          candidates={"BIG": c1, "MID": c2},
+                          quotes={"BIG": {"price": p1, "ask": p1}, "MID": {"price": p2, "ask": p2}})
+        buys = [a["symbol"] for a in E.decide(s)["actions"] if a["action"] == "buy"]
+        self.assertEqual(buys[0], "MID", buys)
+
+    def test_sizing_rules(self):
+        self.assertEqual(E.RULES["max_positions"], 10)
+        self.assertEqual((E.RULES["size_default"], E.RULES["size_mid"], E.RULES["size_high"]),
+                         (200.0, 250.0, 300.0))
+        self.assertEqual(E.RULES["max_name_pct"], 0.20)

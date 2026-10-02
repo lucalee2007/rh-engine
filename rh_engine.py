@@ -18,7 +18,7 @@ import math
 import sys
 from datetime import datetime
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
@@ -37,16 +37,19 @@ RULES = {
     "mcap_max": 8e9,
     "mcap_stretch_max": 10e9,         # only if vol ratio still high
     "price_min": 5.00,
+    "price_max": 50.00,               # no new buys above this (held names are still managed)
+    "price_sweet_low": 10.00,         # preferred price band: ranked ahead of other names
+    "price_sweet_high": 25.00,        # with the same conviction
     "dollar_vol_min": 5e6,
     "min_history_bars": 60,
     # sizing
-    "max_positions": 7,
-    "max_name_pct": 0.18,
+    "max_positions": 10,
+    "max_name_pct": 0.20,
     "max_sector_pct": 0.45,
-    "trade_cap": 250.00,
-    "size_default": 150.00,
-    "size_mid": 200.00,
-    "size_high": 250.00,
+    "trade_cap": 300.00,
+    "size_default": 200.00,
+    "size_mid": 250.00,
+    "size_high": 300.00,
     "max_high_conviction_per_day": 2,
     "max_same_industry_buys_per_day": 3,
     "limit_markup_max": 0.005,        # limit <= ask + 0.5%
@@ -169,6 +172,10 @@ def heikin_ashi(bars):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def in_sweet_spot(price):
+    return RULES["price_sweet_low"] <= price <= RULES["price_sweet_high"]
+
+
 def pct(a, b):
     return (a / b - 1) if b else 0.0
 
@@ -218,20 +225,20 @@ def screen(data):
             if p < RULES["price_min"]:
                 notes.append({"symbol": sym, "reason": f"price ${p:.2f} under $5"})
                 continue
-            if p > RULES["trade_cap"]:
-                notes.append({"symbol": sym, "reason": f"price ${p:.2f} over the ${RULES['trade_cap']:.0f} cap"})
+            if p > RULES["price_max"]:
+                notes.append({"symbol": sym, "reason": f"price ${p:.2f} over ${RULES['price_max']:.0f}"})
                 continue
             if sym in rejected and abs(pct(p, rejected[sym])) < RULES["rejected_recheck_move"]:
                 continue
             chg = pct(p, q["prev_close"])
             if chg >= RULES["breakout_screen_move"]:
-                breakouts.append((rank, -chg, sym))
+                breakouts.append((rank, not in_sweet_spot(p), -chg, sym))
             elif RULES["pullback_screen_low"] <= chg <= 0:
-                pullbacks.append((rank, chg, sym))
+                pullbacks.append((rank, not in_sweet_spot(p), chg, sym))
     breakouts.sort()
-    pullbacks.sort(key=lambda x: (x[0], -x[1]))
+    pullbacks.sort(key=lambda x: (x[0], x[1], -x[2]))
     picks = []
-    for _, _, sym in breakouts + pullbacks:
+    for *_, sym in breakouts + pullbacks:
         if sym not in picks:
             picks.append(sym)
         if len(picks) >= RULES["max_deep_checks"]:
@@ -273,8 +280,8 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
     if price < RULES["price_min"]:
         info["reasons"].append("price under $5")
         return False, info
-    if price > RULES["trade_cap"]:
-        info["reasons"].append(f"price over the ${RULES['trade_cap']:.0f} cap")
+    if price > RULES["price_max"]:
+        info["reasons"].append(f"price over ${RULES['price_max']:.0f}")
         return False, info
     if mcap < RULES["mcap_min"]:
         fails.append(f"market cap ${mcap/1e6:.0f}M under $200M")
@@ -591,7 +598,8 @@ def decide(s):
                 out["near_misses"].append({"symbol": sym, "missed": info["reasons"],
                                            "detail": _brief(info)})
 
-    analyzed.sort(key=lambda x: (-x["conviction"], -(x.get("rs63") or 0)))
+    analyzed.sort(key=lambda x: (-x["conviction"], not in_sweet_spot(x["price"]),
+                                 -(x.get("rs63") or 0)))
     sector_val = {}
     for p in positions:
         sector_val[p.get("sector")] = sector_val.get(p.get("sector"), 0) + p["qty"] * p["price"]
@@ -626,7 +634,7 @@ def decide(s):
         if notional > RULES["max_name_pct"] * tv:
             reasons.append(f"over {RULES['max_name_pct']*100:.0f}% of account")
         if (sector_val.get(sec, 0) + notional) > RULES["max_sector_pct"] * tv:
-            reasons.append(f"sector {sec} would exceed 45%")
+            reasons.append(f"sector {sec} would exceed {RULES['max_sector_pct']*100:.0f}%")
         ind = info.get("industry")
         if industry_buys.get(ind, 0) >= RULES["max_same_industry_buys_per_day"]:
             reasons.append(f"already 3 buys in {ind} today")
