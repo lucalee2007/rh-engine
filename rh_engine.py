@@ -18,7 +18,7 @@ import math
 import sys
 from datetime import datetime
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
@@ -59,9 +59,18 @@ RULES = {
     "rsi_max": 75.0,
     "max_day_drop_without_reclaim": 0.12,
     "vol_ratio_min": 1.5,             # 60d realized vol vs IWM ("beta" proxy)
-    "quality_min": 2,                 # need at least 2 of 6 criteria
+    "quality_min": 2,                 # need at least 2 of 6 criteria...
+    "fundamental_min": 1,             # ...and at least 1 of them a business criterion
+                                      # (revenue growth, gross margin, profits/narrowing losses)
+    "rs_days": 63,                    # relative strength lookback (~3 months)
+    "rs_min": 0.0,                    # must not lag IWM over rs_days
+    "rs_bonus": 0.10,                 # +1 conviction when beating IWM by 10%+
     # exits
-    "stop_pct": 0.10,
+    "stop_pct": 0.10,                 # fallback initial stop when no ATR is available
+    "atr_days": 14,
+    "atr_stop_mult": 2.5,             # initial stop = 2.5 x ATR(14) below entry...
+    "stop_pct_min": 0.07,             # ...but never tighter than 7%
+    "stop_pct_max": 0.15,             # ...or wider than 15%
     "trail_trigger": 0.12,
     "trail_pct": 0.15,
     "take_profit": 0.50,
@@ -109,6 +118,41 @@ def realized_vol(closes, n=60):
     mean = sum(rets) / len(rets)
     var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
     return math.sqrt(var)
+
+
+def atr(bars, n=14):
+    """Wilder average true range over completed daily bars (o/h/l/c)."""
+    if len(bars) < n + 1:
+        return None
+    trs = [max(b["h"] - b["l"], abs(b["h"] - bars[i - 1]["c"]), abs(b["l"] - bars[i - 1]["c"]))
+           for i, b in enumerate(bars) if i > 0]
+    a = sum(trs[:n]) / n
+    for tr in trs[n:]:
+        a = (a * (n - 1) + tr) / n
+    return a
+
+
+def atr_stop_pct(bars, price):
+    """Initial stop distance as a fraction of price: 2.5 x ATR, clamped to 7%-15%."""
+    a = atr(bars, RULES["atr_days"]) if bars else None
+    if not a or not price:
+        return RULES["stop_pct"]
+    return min(RULES["stop_pct_max"], max(RULES["stop_pct_min"], RULES["atr_stop_mult"] * a / price))
+
+
+# Typical cumulative share of a day's volume traded by N minutes after the open
+# (U-shaped intraday volume for US small caps: heavy open, quiet midday, heavy close).
+VOLUME_CURVE = [(0, 0.0), (15, 0.09), (30, 0.15), (60, 0.24), (90, 0.31), (120, 0.37),
+                (150, 0.43), (180, 0.48), (210, 0.53), (240, 0.58), (270, 0.63),
+                (300, 0.69), (330, 0.76), (360, 0.85), (390, 1.0)]
+
+
+def volume_fraction(minutes):
+    m = max(15, min(390, minutes))
+    for (m0, f0), (m1, f1) in zip(VOLUME_CURVE, VOLUME_CURVE[1:]):
+        if m0 <= m <= m1:
+            return f0 + (f1 - f0) * (m - m0) / (m1 - m0)
+    return 1.0
 
 
 def heikin_ashi(bars):
@@ -248,8 +292,13 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
     hi10 = max(b["h"] for b in bars[-10:])
     hi20 = max(b["h"] for b in bars[-20:])
     avg_v20 = sum(vols[-20:]) / 20
-    frac = max(minutes, 15) / 390
-    vol_pace = (today.get("volume", 0) / frac) / avg_v20 if avg_v20 else 0
+    vol_pace = (today.get("volume", 0) / volume_fraction(minutes)) / avg_v20 if avg_v20 else 0
+    n_rs = RULES["rs_days"]
+    rs = None
+    if len(closes_live) > n_rs and len(iwm_closes) > n_rs:
+        rs = pct(price, closes_live[-1 - n_rs]) - pct(iwm_closes[-1], iwm_closes[-1 - n_rs])
+    info["rs63"] = round(rs, 4) if rs is not None else None
+    info["stop_pct"] = round(atr_stop_pct(bars, price), 4)
     info.update({
         "price": price, "day_chg_pct": round(day_chg * 100, 2),
         "sma20": round(s20, 2), "sma50": round(s50, 2), "rsi14": round(r, 1),
@@ -290,6 +339,8 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
         fails.append("no setup (no 20SMA bounce, pullback first-green or breakout)")
     if not (RULES["rsi_min"] <= r <= RULES["rsi_max"]):
         fails.append(f"RSI {r:.1f} outside 30-75")
+    if rs is not None and rs < RULES["rs_min"]:
+        fails.append(f"lagging IWM by {-rs*100:.1f}% over {n_rs} days")
     if freefall:
         info["reasons"].append("free-fall: 3 red days on rising volume, no bounce")
         return False, info
@@ -305,10 +356,15 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
     info["quality"] = q
     if q["count"] < RULES["quality_min"]:
         fails.append(f"quality {q['count']}/6 (needs 2): {', '.join(q['met']) or 'none'}")
+    elif q["fundamental"] < RULES["fundamental_min"]:
+        fails.append(f"no business criterion (needs revenue growth, gross margin or profits): "
+                     f"{', '.join(q['met'])}")
 
     info["earnings_soon"] = bool(c.get("earnings_within_2d"))
+    # high beta already counts once inside quality; the bonus point now rewards
+    # outperforming IWM instead of volatility
     info["conviction"] = (q["count"] + (1 if info["preferred_setup"] else 0)
-                          + (1 if vr and vr >= 2.0 else 0))
+                          + (1 if rs is not None and rs >= RULES["rs_bonus"] else 0))
     info["reasons"].extend(fails)
     # an exception candidate has a real setup and misses exactly one other rule
     if len(fails) == 1 and setup is not None:
@@ -319,6 +375,7 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
 def quality(fin, vol_ratio, group, fund):
     """fin: quarterly rows most-recent-first with revenue, gross_profit, net_income."""
     met = []
+    fundamental = 0
     rows = [f for f in fin if f.get("revenue")]
     if len(rows) >= 5:
         r0, r1, r4 = rows[0]["revenue"], rows[1]["revenue"], rows[4]["revenue"]
@@ -326,13 +383,18 @@ def quality(fin, vol_ratio, group, fund):
         yoy1 = pct(r1, rows[5]["revenue"]) if len(rows) >= 6 else None
         if yoy0 >= 0.25 or (yoy1 is not None and yoy0 > yoy1 and yoy0 > 0):
             met.append(f"revenue +{yoy0*100:.0f}% YoY" + ("" if yoy0 >= 0.25 else ", accelerating"))
-        gm0 = rows[0].get("gross_profit", 0) / r0 if r0 else 0
-        gm4 = rows[4].get("gross_profit", 0) / r4 if r4 else 0
-        if gm0 >= 0.30 or gm0 > gm4:
-            met.append(f"gross margin {gm0*100:.0f}%")
-        ni0, ni4 = rows[0].get("net_income", 0), rows[4].get("net_income", 0)
-        if ni0 > 0 or (ni0 / r0 > ni4 / r4 if r0 and r4 else False):
+            fundamental += 1
+        gp0, gp4 = rows[0].get("gross_profit"), rows[4].get("gross_profit")
+        if gp0 is not None and r0 > 0:
+            gm0 = gp0 / r0
+            gm4 = gp4 / r4 if gp4 is not None and r4 > 0 else None
+            if gm0 >= 0.30 or (gm4 is not None and gm0 > gm4):
+                met.append(f"gross margin {gm0*100:.0f}%")
+                fundamental += 1
+        ni0, ni4 = rows[0].get("net_income") or 0, rows[4].get("net_income") or 0
+        if ni0 > 0 or (ni0 / r0 > ni4 / r4 if r0 > 0 and r4 > 0 else False):
             met.append("profitable" if ni0 > 0 else "losses narrowing")
+            fundamental += 1
     de = fund.get("debt_to_equity")
     if de is not None and de < 2.0:
         met.append(f"debt/equity {de:.1f}")
@@ -340,7 +402,7 @@ def quality(fin, vol_ratio, group, fund):
         met.append(f"growth driver ({group})")
     if vol_ratio and vol_ratio >= RULES["vol_ratio_min"]:
         met.append(f"high beta (vol {vol_ratio:.1f}x IWM)")
-    return {"count": len(met), "met": met}
+    return {"count": len(met), "met": met, "fundamental": fundamental}
 
 
 def manage_position(p, now_date, bought_today):
@@ -355,7 +417,14 @@ def manage_position(p, now_date, bought_today):
     floor_stop = p.get("stop_floor")      # a stop level that must never move lower
     gain = pct(price, cost)
 
-    desired = cost * (1 - RULES["stop_pct"])
+    # initial stop: 2.5 x ATR below cost when bars are supplied; with no bars, a live
+    # broker stop carries it (never re-derive a tighter flat 10% over an ATR stop)
+    if p.get("bars"):
+        desired = cost * (1 - atr_stop_pct(p["bars"], cost))
+    elif existing:
+        desired = 0.0
+    else:
+        desired = cost * (1 - RULES["stop_pct"])
     if pct(high, cost) >= RULES["trail_trigger"]:
         desired = max(desired, high * (1 - RULES["trail_pct"]))
     for lvl in (existing, floor_stop):
@@ -505,7 +574,8 @@ def decide(s):
                 p["symbol"] == sym for p in positions):
             out["skipped"].append({"symbol": sym, "reason": "held, bought or banned today"})
             continue
-        ok, info = analyze_candidate(sym, c, iwm_closes, live, minutes)
+        iwm_live = iwm_closes + ([iwm["price"]] if iwm.get("price") else [])
+        ok, info = analyze_candidate(sym, c, iwm_live, live, minutes)
         info["sector"] = c.get("sector") or (c.get("fund") or {}).get("sector")
         info["industry"] = c.get("industry") or (c.get("fund") or {}).get("industry")
         info["ask"] = (s.get("quotes", {}).get(sym) or {}).get("ask") or live
@@ -518,7 +588,7 @@ def decide(s):
                 out["near_misses"].append({"symbol": sym, "missed": info["reasons"],
                                            "detail": _brief(info)})
 
-    analyzed.sort(key=lambda x: (-x["conviction"], -(x.get("vol_ratio") or 0)))
+    analyzed.sort(key=lambda x: (-x["conviction"], -(x.get("rs63") or 0)))
     sector_val = {}
     for p in positions:
         sector_val[p.get("sector")] = sector_val.get(p.get("sector"), 0) + p["qty"] * p["price"]
@@ -567,11 +637,12 @@ def decide(s):
             "action": "buy", "symbol": sym, "qty": qty, "frac_qty": frac_qty,
             "limit_price": limit, "sizing": sizing,
             "notional": round2(notional), "time_in_force": "gfd",
-            "stop_after_fill_pct": RULES["stop_pct"], "rule": info["setup"],
+            "stop_after_fill_pct": info["stop_pct"], "rule": info["setup"],
             "conviction": info["conviction"],
             "reason": (f"{info['setup']}: ${info['price']:.2f}, SMA20 ${info['sma20']:.2f}, "
                        f"SMA50 ${info['sma50']:.2f}, RSI {info['rsi14']}, vol pace "
-                       f"{info['vol_pace']}x, vol {info.get('vol_ratio')}x IWM; quality "
+                       f"{info['vol_pace']}x, vol {info.get('vol_ratio')}x IWM, RS63 "
+                       f"{(info.get('rs63') or 0)*100:+.1f}% vs IWM, stop {info['stop_pct']*100:.1f}%; quality "
                        f"{info['quality']['count']}/6 ({', '.join(info['quality']['met'])})"
                        + (f"; earnings within 2 days, sized at ${RULES['size_default']:.0f}" if info["earnings_soon"] else "")),
         })

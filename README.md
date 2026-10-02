@@ -45,3 +45,16 @@ Sizing: whole shares toward the target, rounded up one share when that still fit
 cap, 18% per name, the buying-power floor and the sector cap; otherwise topped up with a
 fraction. Stops (`place_stop`, `replace_stop`, `then_stop`) always cover whole shares only.
 `near_misses` are the only names eligible for a logged EXCEPTION.
+
+## v1.3.0 quant rules
+- Quality needs 2 of 6 criteria AND at least one business criterion (revenue growth,
+  gross margin, or profits / narrowing losses). Growth-driver group, high beta and low
+  debt alone no longer pass.
+- Volume pace uses a typical intraday (U-shaped) volume curve, so 9:45 readings aren't
+  inflated ~2.5x.
+- Initial stop = 2.5 x ATR(14) below entry, clamped to 7%-15% (`stop_after_fill_pct` on
+  each buy). Pass each held position's daily `bars` in the snapshot so the engine keeps
+  using its ATR stop; without bars it keeps the live broker stop as the base.
+- Relative strength: skip names lagging IWM over 63 trading days; rank buys by
+  conviction, then 63-day outperformance (no longer by volatility). +1 conviction when
+  beating IWM by 10%+.

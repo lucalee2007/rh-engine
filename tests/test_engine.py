@@ -332,5 +332,66 @@ class TestHybridSizing(unittest.TestCase):
         self.assertEqual(a["then_stop"]["qty"], 2)
 
 
+class TestQuantV13(unittest.TestCase):
+    def test_free_points_no_longer_pass_quality(self):
+        # driver group + high beta + low debt but no business criterion
+        q = E.quality([], 2.5, "semis", {"debt_to_equity": 0.5})
+        self.assertGreaterEqual(q["count"], 2)
+        self.assertEqual(q["fundamental"], 0)
+        price, c = breakout_candidate()
+        c["fin"] = []
+        c["fund"]["debt_to_equity"] = 0.5
+        s = base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
+        out = E.decide(s)
+        self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
+        self.assertIn("business criterion", out["skipped"][0]["reason"])
+
+    def test_missing_gross_profit_not_counted(self):
+        fin = [dict(r, gross_profit=None) for r in GOOD_FIN]
+        q = E.quality(fin, None, "other", {})
+        self.assertFalse(any("gross margin" in m for m in q["met"]))
+
+    def test_volume_curve_morning_not_inflated(self):
+        # a normal day: 9% of average volume done by 9:45 -> pace about 1.0, not 2.3
+        self.assertAlmostEqual(E.volume_fraction(15), 0.09)
+        self.assertAlmostEqual(0.09 / E.volume_fraction(15), 1.0)
+        self.assertEqual(E.volume_fraction(390), 1.0)
+        self.assertLess(E.volume_fraction(200), E.volume_fraction(220))
+
+    def test_atr_stop_clamped(self):
+        calm = [{"o": 10, "h": 10.05, "l": 9.95, "c": 10} for _ in range(30)]
+        wild = [{"o": 10, "h": 11.0, "l": 9.0, "c": 10} for _ in range(30)]
+        self.assertEqual(E.atr_stop_pct(calm, 10), 0.07)
+        self.assertEqual(E.atr_stop_pct(wild, 10), 0.15)
+        mid = [{"o": 10, "h": 10.2, "l": 9.8, "c": 10} for _ in range(30)]
+        self.assertAlmostEqual(E.atr_stop_pct(mid, 10), 0.10)
+
+    def test_buy_carries_atr_stop(self):
+        price, c = breakout_candidate()
+        s = base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
+        b = [a for a in E.decide(s)["actions"] if a["action"] == "buy"][0]
+        self.assertTrue(0.07 <= b["stop_after_fill_pct"] <= 0.15)
+
+    def test_position_atr_stop_not_tightened_without_bars(self):
+        # a 14% ATR stop on the broker must not be pulled up to a flat 10% when bars are missing
+        p = {"symbol": "ABC", "qty": 2, "avg_cost": 100.0, "price": 101.0,
+             "stop_order": {"id": "s1", "stop_price": 86.0}}
+        acts = E.manage_position(p, "2026-10-02", set())
+        self.assertEqual(acts, [])
+
+    def test_relative_strength_filter(self):
+        price, c = breakout_candidate()
+        iwm = base_snapshot()["iwm"]
+        iwm["closes"] = [100 * 1.01 ** i for i in range(80)]   # IWM ripping far ahead
+        iwm["price"] = iwm["closes"][-1]
+        iwm["prev_close"] = iwm["closes"][-1]
+        iwm["open"] = iwm["closes"][-1]
+        s = base_snapshot(iwm=iwm, candidates={"ABC": c},
+                          quotes={"ABC": {"price": price, "ask": price}})
+        out = E.decide(s)
+        self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
+        self.assertIn("lagging IWM", out["skipped"][0]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
