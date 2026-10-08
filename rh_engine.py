@@ -18,14 +18,14 @@ import math
 import sys
 from datetime import datetime
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
 # ---------------------------------------------------------------------------
 RULES = {
     # account-level safety
-    "halt_value": 1137.00,            # 75% of ~$1,516 start: liquidate + halt
+    "halt_value": 1680.00,            # 75% of ~$2,240 after the Oct 2026 deposit: liquidate + halt
     "bp_kill": 250.00,                # buying power below this: liquidate + halt
     "bp_min_after_buy": 300.00,       # never buy below this leftover buying power
     "daily_loss_no_buys": 0.06,       # down 6% vs start of day: no new buys
@@ -43,13 +43,13 @@ RULES = {
     "dollar_vol_min": 5e6,
     "min_history_bars": 60,
     # sizing
-    "max_positions": 10,
+    "max_positions": 12,
     "max_name_pct": 0.20,
     "max_sector_pct": 0.45,
-    "trade_cap": 300.00,
-    "size_default": 200.00,
-    "size_mid": 250.00,
-    "size_high": 300.00,
+    "trade_cap": 325.00,
+    "size_default": 225.00,
+    "size_mid": 275.00,
+    "size_high": 325.00,
     "max_high_conviction_per_day": 2,
     "max_same_industry_buys_per_day": 3,
     "limit_markup_max": 0.005,        # limit <= ask + 0.5%

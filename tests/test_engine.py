@@ -40,8 +40,8 @@ GOOD_FIN = [  # most recent first: +40% YoY, 60% GM, losses narrowing
 def base_snapshot(**kw):
     s = {
         "now_et": "2026-09-24T11:40",
-        "account": {"total_value": 1500.0, "buying_power": 1240.0},
-        "start_of_day_value": 1500.0,
+        "account": {"total_value": 2240.0, "buying_power": 1240.0},
+        "start_of_day_value": 2240.0,
         "orders_today": 0,
         "positions": [],
         "iwm": {"price": 200.0, "prev_close": 200.0, "open": 200.0, "closes": iwm_closes()},
@@ -93,13 +93,13 @@ class TestSafety(unittest.TestCase):
         self.assertEqual(out["actions"][0]["cancel_order_id"], "x")
 
     def test_bp_kill(self):
-        out = E.decide(base_snapshot(account={"total_value": 1500.0, "buying_power": 200.0}))
+        out = E.decide(base_snapshot(account={"total_value": 2240.0, "buying_power": 200.0}))
         self.assertTrue(out["halt"])
 
     def test_daily_loss_blocks_buys(self):
         price, c = breakout_candidate()
-        s = base_snapshot(account={"total_value": 1400.0, "buying_power": 1200.0},
-                          start_of_day_value=1500.0, candidates={"ABC": c},
+        s = base_snapshot(account={"total_value": 2090.0, "buying_power": 1200.0},
+                          start_of_day_value=2240.0, candidates={"ABC": c},
                           quotes={"ABC": {"price": price, "ask": price}})
         out = E.decide(s)
         self.assertFalse(out["buys_allowed"])
@@ -144,7 +144,7 @@ class TestBuys(unittest.TestCase):
 
     def test_bp_floor_blocks(self):
         price, c = breakout_candidate()
-        s = base_snapshot(account={"total_value": 1500.0, "buying_power": 400.0},
+        s = base_snapshot(account={"total_value": 2240.0, "buying_power": 400.0},
                           candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}})
         out = E.decide(s)
         self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
@@ -238,8 +238,13 @@ class TestAggressiveRules(unittest.TestCase):
         acts = E.manage_position(p, "2026-09-24", set())
         self.assertFalse(any(a.get("rule") == "take_profit" for a in acts))
 
+    def test_halt_level_v15(self):
+        self.assertEqual(E.RULES["halt_value"], 1680.0)
+        self.assertTrue(E.decide(base_snapshot(account={"total_value": 1679.0, "buying_power": 1200.0}))["halt"])
+        self.assertFalse(E.decide(base_snapshot(account={"total_value": 1700.0, "buying_power": 1200.0}))["halt"])
+
     def test_bp_450_no_longer_halts(self):
-        out = E.decide(base_snapshot(account={"total_value": 1500.0, "buying_power": 450.0}))
+        out = E.decide(base_snapshot(account={"total_value": 2240.0, "buying_power": 450.0}))
         self.assertFalse(out["halt"])
 
     def test_orders_7_still_allows_buys(self):
@@ -432,14 +437,15 @@ class TestPriceBand(unittest.TestCase):
     def test_decide_ranks_sweet_spot_first(self):
         p1, c1 = breakout_candidate(start=30.0)   # ~$41
         p2, c2 = breakout_candidate(start=10.0)   # ~$14
-        s = base_snapshot(account={"total_value": 2000.0, "buying_power": 2000.0},
+        s = base_snapshot(account={"total_value": 2240.0, "buying_power": 2000.0},
                           candidates={"BIG": c1, "MID": c2},
                           quotes={"BIG": {"price": p1, "ask": p1}, "MID": {"price": p2, "ask": p2}})
         buys = [a["symbol"] for a in E.decide(s)["actions"] if a["action"] == "buy"]
         self.assertEqual(buys[0], "MID", buys)
 
     def test_sizing_rules(self):
-        self.assertEqual(E.RULES["max_positions"], 10)
+        self.assertEqual(E.RULES["max_positions"], 12)
         self.assertEqual((E.RULES["size_default"], E.RULES["size_mid"], E.RULES["size_high"]),
-                         (200.0, 250.0, 300.0))
+                         (225.0, 275.0, 325.0))
+        self.assertEqual(E.RULES["trade_cap"], 325.0)
         self.assertEqual(E.RULES["max_name_pct"], 0.20)

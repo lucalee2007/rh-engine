@@ -41,8 +41,8 @@ fractional quantity as a MARKET order, regular hours, GFD, only if the live ask 
 within 0.5% of `limit_price` (Robinhood takes fractional orders only as market orders in
 regular hours, and won't hold any stop on a fraction). The fraction has no broker stop; the
 scans manage it.
-Sizing: whole shares toward the target, rounded up one share when that still fits the $250
-cap, 18% per name, the buying-power floor and the sector cap; otherwise topped up with a
+Sizing: whole shares toward the target, rounded up one share when that still fits the trade
+cap, 20% per name, the buying-power floor and the sector cap; otherwise topped up with a
 fraction. Stops (`place_stop`, `replace_stop`, `then_stop`) always cover whole shares only.
 `near_misses` are the only names eligible for a logged EXCEPTION.
 
@@ -65,3 +65,12 @@ fraction. Stops (`place_stop`, `replace_stop`, `then_stop`) always cover whole s
 - Preferred band $10-$25: ranked ahead of other names with the same conviction, in both
   `screen` and `decide`.
 - Up to 10 positions; buys sized $200 / $250 / $300 by conviction, $300 cap, 20% per name.
+
+## v1.5.0 larger balance (~$2,240 after the Oct 2026 deposit)
+- Halt level rebased to $1,680 (75% of the new balance, same rule as before; was $1,137).
+- Up to 12 positions; buys sized $225 / $275 / $325 by conviction, $325 cap, 20% per name.
+- Buying-power floors stay fixed ($300 after a buy, $250 kill), so more of the cash is
+  deployable. The engine still only buys when a name passes every rule; it never forces buys.
+- Backtest at $2,240 (halt off): v1.4.0 +125%, Sharpe 1.47, max DD -28.7%; v1.5.0 +109%,
+  Sharpe 1.32, max DD -30.7%; last 12 months v1.4.0 +56% / DD -28.4% vs v1.5.0 +85% / DD -18.4%.
+  Larger sizes ($250-$450) backtested worse (Sharpe ~0.9-1.1, DD 35-38%).
