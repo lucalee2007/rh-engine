@@ -203,6 +203,19 @@ class TestPositions(unittest.TestCase):
         self.assertEqual(acts[0]["action"], "replace_stop")
         self.assertAlmostEqual(acts[0]["stop_price"], 11.05)
 
+    def test_log_records_high_since_entry(self):
+        held = {"symbol": "ABC", "qty": 10, "avg_cost": 10.0, "price": 12.5,
+                "high_since_entry": 13.0, "stop_order": {"id": "s1", "stop_price": 11.05},
+                "stop_floor": 11.05}
+        out = E.decide(base_snapshot(positions=[held]))
+        line = [x for x in out["log"] if x.startswith("position ABC")][0]
+        self.assertIn("high_since_entry $13.00", line)
+        # a new high today is what gets logged, so the next scan's floor is never stale
+        held2 = dict(held, price=13.4)
+        out = E.decide(base_snapshot(positions=[held2]))
+        line = [x for x in out["log"] if x.startswith("position ABC")][0]
+        self.assertIn("high_since_entry $13.40", line)
+
     def test_take_profit_half(self):
         p = {"symbol": "ABC", "qty": 10, "avg_cost": 10.0, "price": 15.2,
              "high_since_entry": 15.3, "stop_order": {"id": "s1", "stop_price": 11.3}}

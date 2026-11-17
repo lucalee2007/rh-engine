@@ -18,7 +18,7 @@ import math
 import sys
 from datetime import datetime
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
@@ -693,9 +693,11 @@ def _brief(info):
 
 def _finish(out, positions):
     for p in positions:
+        high = max(p.get("high_since_entry") or p["price"], p["price"])
         out["log"].append(
             f"position {p['symbol']}: {p['qty']} @ ${p['avg_cost']:.2f}, now ${p['price']:.2f} "
-            f"({pct(p['price'], p['avg_cost'])*100:+.1f}%), stop ${p.get('_desired_stop', 0):.2f}")
+            f"({pct(p['price'], p['avg_cost'])*100:+.1f}%), stop ${p.get('_desired_stop', 0):.2f}, "
+            f"high_since_entry ${high:.2f}")
     for a in out["actions"]:
         qty_txt = f"{a.get('qty')}" + (f" + {a['frac_qty']} frac" if a.get("frac_qty") else "")
         out["log"].append(f"ACTION {a['action'].upper()} {a['symbol']} "
