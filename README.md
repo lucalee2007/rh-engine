@@ -74,3 +74,8 @@ fraction. Stops (`place_stop`, `replace_stop`, `then_stop`) always cover whole s
 - Backtest at $2,240 (halt off): v1.4.0 +125%, Sharpe 1.47, max DD -28.7%; v1.5.0 +109%,
   Sharpe 1.32, max DD -30.7%; last 12 months v1.4.0 +56% / DD -28.4% vs v1.5.0 +85% / DD -18.4%.
   Larger sizes ($250-$450) backtested worse (Sharpe ~0.9-1.1, DD 35-38%).
+
+## v1.5.1 high_since_entry in the log
+- Each `position` log line now ends with `high_since_entry $X` (the higher of the snapshot
+  value and today's price). Scans copy the engine log into the Drive scan log, so the next
+  scan can floor high_since_entry at the last logged value. No rule or sizing changes.
