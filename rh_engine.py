@@ -16,9 +16,9 @@ from __future__ import annotations
 import json
 import math
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 
 # ---------------------------------------------------------------------------
 # Rules (Luca's high-beta ruleset, 23 Sep 2026). Only Luca changes these.
@@ -47,9 +47,12 @@ RULES = {
     "max_name_pct": 0.20,
     "max_sector_pct": 0.45,
     "trade_cap": 325.00,
-    "size_default": 225.00,
-    "size_mid": 275.00,
-    "size_high": 325.00,
+    # v1.6.0: one size for every buy. In the 22 Sep-17 Nov live record the $300+
+    # "high conviction" buys went 1 win in 9 (-$149) while quality-2 buys made money,
+    # so the conviction score no longer scales the order.
+    "size_default": 250.00,
+    "size_mid": 250.00,
+    "size_high": 250.00,
     "max_high_conviction_per_day": 2,
     "max_same_industry_buys_per_day": 3,
     "limit_markup_max": 0.005,        # limit <= ask + 0.5%
@@ -69,6 +72,15 @@ RULES = {
     "rs_days": 63,                    # relative strength lookback (~3 months)
     "rs_min": 0.0,                    # must not lag IWM over rs_days
     "rs_bonus": 0.10,                 # +1 conviction when beating IWM by 10%+
+    "preferred_setup_bonus": 0,       # v1.6.0: was +1 for bounce/pullback; breakouts did
+                                      # better live, so setups no longer rank above them
+    # v1.6.0 entry filters from the live trade review (see README)
+    "dip_setups_need_iwm_uptrend": 1, # bounce/pullback only while IWM's last close is above
+                                      # its 50-day SMA; breakouts are allowed in any market
+    "reentry_cooldown_days": 10,      # no buy within 10 trading days of a LOSING exit in that
+                                      # name (live: re-buys after losses went 0 for 4, -$68)
+    "reentry_cooldown_after_win_days": 0,  # after a winning exit (0 = re-entry allowed)
+    "revenue_decline_max": 0.10,      # fail if revenue is down 10%+ year on year
     # exits
     "stop_pct": 0.10,                 # fallback initial stop when no ATR is available
     "atr_days": 14,
@@ -80,6 +92,8 @@ RULES = {
     "take_profit": 0.50,
     "time_stop_days": 25,
     "time_stop_gain": 0.05,
+    "earnings_exit": 1,               # v1.6.0: sell before a report (after today's close or
+                                      # before the next open); needs earnings_before_next_open
     # screening
     "max_deep_checks": 12,
     "breakout_screen_move": 0.02,
@@ -191,6 +205,23 @@ def in_buy_window(now_et):
     return lo <= hm <= hi
 
 
+def trading_days_between(d0, d1):
+    """Weekdays after date d0 up to and including d1 (YYYY-MM-DD). Holidays are ignored."""
+    a, b = date.fromisoformat(d0[:10]), date.fromisoformat(d1[:10])
+    n = 0
+    while a < b:
+        a += timedelta(days=1)
+        n += a.weekday() < 5
+    return n
+
+
+def iwm_uptrend(closes):
+    """True when IWM's last completed close is above its 50-day SMA (None if too short)."""
+    if len(closes) < 50:
+        return None
+    return closes[-1] > sum(closes[-50:]) / 50
+
+
 def round2(x):
     return math.floor(x * 100 + 0.5) / 100
 
@@ -249,12 +280,12 @@ def screen(data):
 # ---------------------------------------------------------------------------
 # Stage 2: decide
 # ---------------------------------------------------------------------------
-def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
+def analyze_candidate(sym, c, iwm_closes, live_price, minutes, market_up=None):
     """Return (passes, info) for one candidate. info always has 'reasons'."""
     bars = c["bars"]                      # completed daily bars, oldest first
     today = c.get("today", {})
     fund = c.get("fund", {})
-    info = {"symbol": sym, "reasons": [], "near_miss": False}
+    info = {"symbol": sym, "reasons": [], "near_miss": False, "group": c.get("group")}
     fails = []
 
     if len(bars) < RULES["min_history_bars"]:
@@ -324,9 +355,13 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
                 and last3[0]["v"] < last3[1]["v"] < last3[2]["v"])
 
     setup = None
+    # v1.6.0: a move through the 10/20-day high on volume is a breakout even if the stock
+    # touched its 20-day SMA recently; it is buying strength, not a dip
+    if price > hi10 and vol_pace >= 1.0:
+        setup = "breakout_20d" if price > hi20 else "breakout_10d"
     # preferred 1: bounce off a rising 20-day SMA
     touched = any(b["l"] <= s20 * 1.02 for b in bars[-3:]) or today.get("low", price) <= s20 * 1.02
-    if sma20_rising and price > s20 and touched and (green or selling_slowed):
+    if setup is None and sma20_rising and price > s20 and touched and (green or selling_slowed):
         setup = "bounce_20sma"
     # preferred 2: first green day after a 3-10 day pullback on shrinking volume
     if setup is None and green:
@@ -337,14 +372,15 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
         if 3 <= days_since_hi <= 10 and pulled and bars[-1]["c"] < bars[-2]["c"] + 1e-9:
             if sum(b["v"] for b in pulled) / len(pulled) < avg_v20:
                 setup = "pullback_first_green"
-    # acceptable: breakout through the 10-20 day high on above-average volume
-    if setup is None and price > hi10 and vol_pace >= 1.0:
-        setup = "breakout_20d" if price > hi20 else "breakout_10d"
     info["setup"] = setup
     info["preferred_setup"] = setup in ("bounce_20sma", "pullback_first_green")
 
     if setup is None:
         fails.append("no setup (no 20SMA bounce, pullback first-green or breakout)")
+    elif (info["preferred_setup"] and RULES["dip_setups_need_iwm_uptrend"]
+          and market_up is False):
+        fails.append(f"{setup} is a dip buy and IWM is below its 50-day SMA "
+                     "(only breakouts in a falling market)")
     if not (RULES["rsi_min"] <= r <= RULES["rsi_max"]):
         fails.append(f"RSI {r:.1f} outside 30-75")
     if rs is not None and rs < RULES["rs_min"]:
@@ -367,11 +403,14 @@ def analyze_candidate(sym, c, iwm_closes, live_price, minutes):
     elif q["fundamental"] < RULES["fundamental_min"] and q["has_fin"]:
         fails.append(f"no business criterion (needs revenue growth, gross margin or profits): "
                      f"{', '.join(q['met'])}")
+    if q.get("revenue_yoy") is not None and q["revenue_yoy"] <= -RULES["revenue_decline_max"]:
+        fails.append(f"revenue down {-q['revenue_yoy']*100:.0f}% YoY "
+                     f"(limit -{RULES['revenue_decline_max']*100:.0f}%)")
 
     info["earnings_soon"] = bool(c.get("earnings_within_2d"))
     # high beta already counts once inside quality; the bonus point now rewards
     # outperforming IWM instead of volatility
-    info["conviction"] = (q["count"] + (1 if info["preferred_setup"] else 0)
+    info["conviction"] = (q["count"] + (RULES["preferred_setup_bonus"] if info["preferred_setup"] else 0)
                           + (1 if rs is not None and rs >= RULES["rs_bonus"] else 0))
     info["reasons"].extend(fails)
     # an exception candidate has a real setup and misses exactly one other rule
@@ -385,9 +424,11 @@ def quality(fin, vol_ratio, group, fund):
     met = []
     fundamental = 0
     rows = [f for f in fin if f.get("revenue")]
+    yoy = None
     if len(rows) >= 5:
         r0, r1, r4 = rows[0]["revenue"], rows[1]["revenue"], rows[4]["revenue"]
         yoy0 = pct(r0, r4)
+        yoy = yoy0
         yoy1 = pct(r1, rows[5]["revenue"]) if len(rows) >= 6 else None
         if yoy0 >= 0.25 or (yoy1 is not None and yoy0 > yoy1 and yoy0 > 0):
             met.append(f"revenue +{yoy0*100:.0f}% YoY" + ("" if yoy0 >= 0.25 else ", accelerating"))
@@ -412,7 +453,8 @@ def quality(fin, vol_ratio, group, fund):
         met.append(f"high beta (vol {vol_ratio:.1f}x IWM)")
     # has_fin: Robinhood has no financials for ~40% of the watchlist; the business check
     # only applies when there are 5+ quarters to judge (otherwise it would ban those names)
-    return {"count": len(met), "met": met, "fundamental": fundamental, "has_fin": len(rows) >= 5}
+    return {"count": len(met), "met": met, "fundamental": fundamental, "has_fin": len(rows) >= 5,
+            "revenue_yoy": yoy}
 
 
 def manage_position(p, now_date, bought_today):
@@ -458,6 +500,14 @@ def manage_position(p, now_date, bought_today):
                          "cancel_order_id": None, "rule": "stop",
                          "reason": f"price ${price:.2f} at/below stop ${desired:.2f}: selling the "
                                    f"fractional {frac_part} (broker stop covers {whole} whole)"})
+            return acts
+
+    if RULES["earnings_exit"] and p.get("earnings_before_next_open"):
+        if same_day:
+            p["_earnings_same_day"] = True
+        else:
+            sell_all("earnings_exit", "reports before the next open: selling ahead of the "
+                     "earnings gap (stops can't protect against it)")
             return acts
 
     if not same_day:
@@ -544,9 +594,18 @@ def decide(s):
         no_buy.append(f"IWM waterfall ({iwm_chg*100:.1f}% and below its open)")
     if not in_buy_window(now):
         no_buy.append("outside the 9:45-15:45 ET buy window")
-    log.append(f"IWM {iwm_chg*100:+.2f}% on the day")
+    market_up = iwm_uptrend(iwm.get("closes", []))
+    log.append(f"IWM {iwm_chg*100:+.2f}% on the day; trend "
+               + ("up (last close above 50-day SMA)" if market_up else
+                  "down (last close below 50-day SMA): breakouts only" if market_up is False
+                  else "unknown (under 50 closes)"))
 
     # 2. positions
+    if RULES["earnings_exit"]:
+        missing = [p["symbol"] for p in positions if "earnings_before_next_open" not in p]
+        if missing:
+            out["flags"].append("earnings_before_next_open missing for " + ", ".join(missing)
+                                + ": the pre-earnings exit could not be checked")
     budget = RULES["max_orders_per_day"] - orders_used
     for p in positions:
         for a in manage_position(p, now[:10], bought_today):
@@ -577,6 +636,7 @@ def decide(s):
 
     minutes = minutes_since_open(now)
     iwm_closes = iwm.get("closes", [])
+    recent_exits = s.get("recent_exits") or {}
     analyzed = []
     for sym, c in s.get("candidates", {}).items():
         live = (s.get("quotes", {}).get(sym) or {}).get("price") or c.get("price")
@@ -584,8 +644,22 @@ def decide(s):
                 p["symbol"] == sym for p in positions):
             out["skipped"].append({"symbol": sym, "reason": "held, bought or banned today"})
             continue
+        if sym in recent_exits:
+            ex = recent_exits[sym]
+            ex_date = ex if isinstance(ex, str) else ex.get("date")
+            ex_pnl = None if isinstance(ex, str) else ex.get("pnl")
+            lost = ex_pnl is None or ex_pnl <= 0          # unknown P&L counts as a loss
+            need = RULES["reentry_cooldown_days"] if lost else RULES["reentry_cooldown_after_win_days"]
+            n = trading_days_between(ex_date, now) if ex_date else None
+            if need and n is not None and n < need:
+                what = "a loss" if ex_pnl is not None and lost else (
+                    "an exit with unknown P&L" if ex_pnl is None else "a win")
+                out["skipped"].append({"symbol": sym, "reason": (
+                    f"re-entry cool-off: sold {ex_date} at {what}, {n} trading days ago "
+                    f"(needs {need})")})
+                continue
         iwm_live = iwm_closes + ([iwm["price"]] if iwm.get("price") else [])
-        ok, info = analyze_candidate(sym, c, iwm_live, live, minutes)
+        ok, info = analyze_candidate(sym, c, iwm_live, live, minutes, market_up)
         info["sector"] = c.get("sector") or (c.get("fund") or {}).get("sector")
         info["industry"] = c.get("industry") or (c.get("fund") or {}).get("industry")
         info["ask"] = (s.get("quotes", {}).get(sym) or {}).get("ask") or live
@@ -607,6 +681,7 @@ def decide(s):
     high_conv_used = s.get("high_conviction_buys_today", 0)
     bp_left = bp
     n_pos = open_positions
+
     for info in analyzed:
         sym = info["symbol"]
         if budget < 2 or n_pos >= RULES["max_positions"]:

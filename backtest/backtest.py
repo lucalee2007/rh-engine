@@ -22,7 +22,9 @@ Simplifications (read these before trusting a number):
   * Fractional shares have no stop; the engine sells them at its daily decision.
   * Financials are used only ~50 days after each quarter ends (rough reporting lag);
     market cap is today's share count times the historical price.
-  * No earnings calendar history: earnings_within_2d is always false.
+  * No earnings calendar history: earnings_within_2d and earnings_before_next_open are
+    always false, so the v1.6.0 pre-earnings exit never fires here.
+  * Sectors are the watchlist groups, as in the live scans (since v1.6.0).
   * Survivorship bias: the universe is today's watchlist, picked with hindsight.
   * No PDT, commissions or partial fills. Starting cash default $1,500.
 """
@@ -71,6 +73,7 @@ class Sim:
         self.equity = []         # (date, value)
         self.halted = None
         self.n_orders = 0
+        self.last_exit = {}      # sym -> {"date", "pnl"} of its most recent sell day
         self.dates = [b["d"] for b in self.bars["IWM"]]
         self.idx = {s: {b["d"]: i for i, b in enumerate(bs)} for s, bs in self.bars.items()}
         self.t0 = max(IWM_BARS, next(i for i, d in enumerate(self.dates) if d >= start))
@@ -103,6 +106,11 @@ class Sim:
         p = self.pos[sym]
         qty = min(qty, p["qty"])
         self.cash += qty * price
+        prev = self.last_exit.get(sym)
+        pnl = qty * (price - p["avg_cost"])
+        if prev and prev["date"] == d:
+            pnl += prev["pnl"]
+        self.last_exit[sym] = {"date": d, "pnl": pnl}
         self.trades.append({"symbol": sym, "entry_date": p["entry_date"], "exit_date": d,
                             "entry": p["avg_cost"], "exit": price, "qty": qty,
                             "pnl": qty * (price - p["avg_cost"]), "rule": rule})
@@ -147,7 +155,9 @@ class Sim:
             days_held = self.idx["IWM"][d] - self.idx["IWM"][p["entry_date"]]
             positions.append({
                 "symbol": sym, "qty": p["qty"], "avg_cost": p["avg_cost"], "price": b["c"],
-                "sector": (self.fund.get(sym) or {}).get("sector"),
+                # the live scans use the watchlist group as the sector
+                "sector": self.uni["groups"].get(sym), "group": self.uni["groups"].get(sym),
+                "earnings_before_next_open": False,   # no earnings history in the data
                 "stop_order": ({"id": sym, "stop_price": p["stop"]["price"]}
                                if p["stop"] else None),
                 "stop_floor": None, "high_since_entry": p["high"],
@@ -173,7 +183,7 @@ class Sim:
                 "fund": {"market_cap": mcap, "sector": f.get("sector"),
                          "industry": f.get("industry")},
                 "fin": self.fin_rows(sym, d), "group": self.uni["groups"].get(sym),
-                "sector": f.get("sector"), "industry": f.get("industry"),
+                "sector": self.uni["groups"].get(sym), "industry": f.get("industry"),
                 "earnings_within_2d": False}
         quotes_c = {s: {"price": self.bar(s, d)["c"], "ask": self.bar(s, d)["c"]}
                     for s in list(cands) + held}
@@ -182,6 +192,8 @@ class Sim:
             "account": {"total_value": self.value(d), "buying_power": self.cash},
             "start_of_day_value": prev_value, "orders_today": 0, "halted": False,
             "positions": positions, "bought_today": [], "banned_today": [],
+            "recent_exits": {s: x for s, x in self.last_exit.items()
+                             if (date.fromisoformat(d) - date.fromisoformat(x["date"])).days <= 45},
             "industry_buys_today": {}, "high_conviction_buys_today": 0,
             "iwm": {"price": iwm_b["c"], "prev_close": self.bars["IWM"][i - 1]["c"],
                     "open": iwm_b["o"], "closes": iwm_hist},

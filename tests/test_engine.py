@@ -459,6 +459,110 @@ class TestPriceBand(unittest.TestCase):
     def test_sizing_rules(self):
         self.assertEqual(E.RULES["max_positions"], 12)
         self.assertEqual((E.RULES["size_default"], E.RULES["size_mid"], E.RULES["size_high"]),
-                         (225.0, 275.0, 325.0))
+                         (250.0, 250.0, 250.0))
         self.assertEqual(E.RULES["trade_cap"], 325.0)
         self.assertEqual(E.RULES["max_name_pct"], 0.20)
+
+
+def bounce_candidate():
+    """Steady uptrend, then a 3-day dip toward the rising 20-day SMA and a green day."""
+    closes = [20 * 1.006 ** i for i in range(72)]
+    peak = closes[-1]
+    closes += [peak * 0.985, peak * 0.97, peak * 0.96]
+    price = round(closes[-1] * 1.01, 2)
+    return price, {
+        "bars": bars_from(closes, vol=1_000_000),
+        "today": {"open": closes[-1], "low": closes[-1] * 0.995, "volume": 600_000},
+        "fund": {"market_cap": 2e9, "sector": "Electronic Technology",
+                 "industry": "Semiconductors"},
+        "fin": GOOD_FIN, "group": "semis", "earnings_within_2d": False,
+    }
+
+
+def falling_iwm(n=80):
+    return [220 - 0.25 * i for i in range(n)]
+
+
+class TestTradeReview(unittest.TestCase):
+    """v1.6.0 rules from the 22 Sep - 17 Nov live trade review."""
+
+    def buys(self, s):
+        return [a for a in E.decide(s)["actions"] if a["action"] == "buy"]
+
+    def snap(self, price, c, **kw):
+        return base_snapshot(candidates={"ABC": c}, quotes={"ABC": {"price": price, "ask": price}},
+                             **kw)
+
+    def test_cooloff_after_loss_blocks_rebuy(self):
+        price, c = breakout_candidate()
+        out = E.decide(self.snap(price, c, recent_exits={"ABC": {"date": "2026-09-21", "pnl": -12.0}}))
+        self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
+        self.assertIn("re-entry cool-off", out["skipped"][0]["reason"])
+
+    def test_cooloff_unknown_pnl_counts_as_loss(self):
+        price, c = breakout_candidate()
+        self.assertEqual(self.buys(self.snap(price, c, recent_exits={"ABC": "2026-09-22"})), [])
+
+    def test_rebuy_after_a_win_is_allowed(self):
+        price, c = breakout_candidate()
+        s = self.snap(price, c, recent_exits={"ABC": {"date": "2026-09-23", "pnl": 40.0}})
+        self.assertEqual(len(self.buys(s)), 1)
+
+    def test_cooloff_expires_after_10_trading_days(self):
+        price, c = breakout_candidate()
+        # 2026-09-09 -> 2026-09-24 is 11 trading days
+        s = self.snap(price, c, recent_exits={"ABC": {"date": "2026-09-09", "pnl": -12.0}})
+        self.assertEqual(len(self.buys(s)), 1)
+        self.assertEqual(E.trading_days_between("2026-09-09", "2026-09-24T11:40"), 11)
+
+    def test_dip_buy_blocked_when_iwm_below_50sma(self):
+        price, c = bounce_candidate()
+        iwm = {"price": 200.0, "prev_close": 200.0, "open": 200.0, "closes": falling_iwm()}
+        out = E.decide(self.snap(price, c, iwm=iwm))
+        self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
+        self.assertIn("dip buy", out["skipped"][0]["reason"])
+        self.assertTrue(any("breakouts only" in line for line in out["log"]))
+
+    def test_dip_buy_allowed_when_iwm_above_50sma(self):
+        price, c = bounce_candidate()
+        self.assertEqual(len(self.buys(self.snap(price, c))), 1)
+
+    def test_breakout_allowed_in_a_falling_market(self):
+        price, c = breakout_candidate()
+        iwm = {"price": 200.0, "prev_close": 200.0, "open": 200.0, "closes": falling_iwm()}
+        self.assertEqual(len(self.buys(self.snap(price, c, iwm=iwm))), 1)
+
+    def test_shrinking_revenue_fails(self):
+        price, c = breakout_candidate()
+        c["fin"] = [{"revenue": r, "gross_profit": r * 0.6, "net_income": -5}
+                    for r in (80, 85, 90, 95, 100, 105)]          # -20% YoY
+        out = E.decide(self.snap(price, c))
+        self.assertFalse(any(a["action"] == "buy" for a in out["actions"]))
+        self.assertIn("revenue down 20% YoY", out["skipped"][0]["reason"])
+
+    def test_flat_size_regardless_of_conviction(self):
+        price, c = breakout_candidate()
+        b = self.buys(self.snap(price, c))[0]
+        self.assertLessEqual(b["notional"], 250 + price + 1e-6)   # 250 target, +1 share rounding
+        self.assertEqual(E.RULES["preferred_setup_bonus"], 0)
+
+    def test_earnings_exit_sells_whole_position(self):
+        p = {"symbol": "DSP", "qty": 22, "avg_cost": 12.67, "price": 12.86,
+             "stop_order": {"id": "s1", "stop_price": 12.28}, "earnings_before_next_open": True}
+        acts = E.manage_position(p, "2026-11-09", set())
+        self.assertEqual(acts[0]["rule"], "earnings_exit")
+        self.assertEqual(acts[0]["qty"], 22)
+        self.assertEqual(acts[0]["cancel_order_id"], "s1")
+
+    def test_earnings_exit_waits_if_bought_today(self):
+        p = {"symbol": "DSP", "qty": 22, "avg_cost": 12.67, "price": 12.86,
+             "stop_order": {"id": "s1", "stop_price": 12.28}, "earnings_before_next_open": True}
+        self.assertEqual([a for a in E.manage_position(p, "2026-11-09", {"DSP"})
+                          if a["action"] == "sell"], [])
+
+    def test_missing_earnings_field_is_flagged(self):
+        held = {"symbol": "ABC", "qty": 10, "avg_cost": 10.0, "price": 10.5,
+                "stop_order": {"id": "s1", "stop_price": 9.0}, "stop_floor": 9.0}
+        out = E.decide(base_snapshot(positions=[held]))
+        self.assertTrue(any("earnings_before_next_open missing for ABC" in f for f in out["flags"]))
+
